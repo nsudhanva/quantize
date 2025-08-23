@@ -8,11 +8,11 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - uses: astral-sh/setup-uv@v1
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
       - run: uv sync --all-extras
       - run: uv run pre-commit run --all-files
       - run: uv run pytest
