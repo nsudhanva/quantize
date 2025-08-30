@@ -35,25 +35,115 @@ uv sync --group dev
 ### Concept details
 
 #### FP16 weights
-Casting model parameters from 32‑bit to 16‑bit floating point (FP16) halves the storage and bandwidth requirements. The reduced precision can introduce small numerical errors, but for many inference workloads the accuracy drop is negligible and the savings in memory and throughput are substantial.
+Casting model parameters from 32‑bit to 16‑bit floating point (FP16) halves storage and memory bandwidth. Each parameter is rounded to the closest FP16 value before being saved. At inference the model reads the FP16 tensors directly, cutting the amount of data moved through the system while keeping arithmetic in floating point.
+
+```mermaid
+flowchart TD
+    A[FP32 weights] -->|cast| B[FP16 weights]
+    B -->|write| C[Checkpoint]
+    C -->|load| D[FP16 tensors]
+    D --> E[Inference]
+    B --> F[Reduced memory & bandwidth]
+```
 
 #### Dynamic quantization
-Dynamic quantization converts certain layers (typically `nn.Linear`) to lower‑precision integer operations at inference time. Weights are stored as INT8 and scaled back to floating point during execution. This technique requires no retraining and yields significant speedups on CPU at the cost of a minor accuracy reduction.
+Dynamic quantization converts layers such as `nn.Linear` to integer arithmetic on‑the‑fly. Before the model runs, weights are mapped from floating point to INT8 along with a scale factor and zero point. At runtime activations are quantized, an INT8 matrix multiply executes, and the result is scaled back to FP32. No retraining is required and CPU inference often becomes faster with only a small accuracy loss.
+
+```mermaid
+flowchart LR
+    W[FP32 weights] --> Q[Quantize \n INT8 + scale]
+    A[FP32 activations] --> QA[Quantize activations]
+    Q --> M[INT8 matmul]
+    QA --> M
+    M --> DQ[Dequantize to FP32 output]
+```
+
+```mermaid
+sequenceDiagram
+    participant P as Preprocess
+    participant R as Runtime
+    P->>R: Convert weights to INT8
+    R->>R: Quantize activations
+    R->>R: INT8 matmul
+    R->>R: Dequantize result
+```
 
 #### Structured pruning
-Structured pruning removes entire channels or neurons based on a criterion such as the `ln` norm of weights. By eliminating groups of parameters instead of individual weights, the resulting model can exploit sparsity more effectively on hardware that supports it. Pruned models may require fine‑tuning to regain lost accuracy.
+Structured pruning removes whole channels or neurons using a criterion such as the `ln` norm of each channel's weights. Channels whose norm falls below a threshold are deleted, yielding a smaller dense layer. Because complete structures disappear, many accelerators can realize speedups without specialized sparse kernels, though fine‑tuning is often needed to recover accuracy.
+
+```mermaid
+flowchart TD
+    A[Original layer \n with N channels] --> B[Compute ln norm \n per channel]
+    B --> C{Below threshold?}
+    C -->|yes| D[Drop channel]
+    C -->|no| E[Keep channel]
+    D & E --> F[Compact pruned layer]
+```
 
 #### Low‑rank factorization
-Low‑rank factorization decomposes a weight matrix into the product of two smaller matrices. Choosing a low rank reduces both the number of parameters and the compute cost. The rank must be carefully selected to balance model size and approximation error.
+Low‑rank factorization replaces a large weight matrix with the product of two smaller matrices. If the original matrix has shape `m x n`, it can be approximated by matrices `U (m x r)` and `V (r x n)` where `r` is much smaller than `m` or `n`. The input is first multiplied by `U` and then by `V`, reducing both parameters and multiply‑adds. Choosing `r` trades accuracy for efficiency.
+
+```mermaid
+flowchart LR
+    W[Weight matrix m×n] -->|factorize| U[m×r] & V[r×n]
+    X[Input] --> U --> V --> Y[Output]
+```
 
 #### Knowledge distillation
-Knowledge distillation trains a smaller “student” network to mimic a larger “teacher” model by matching its logits or intermediate representations. The student inherits much of the teacher’s performance while using fewer parameters, though it requires an additional training phase.
+Knowledge distillation trains a compact "student" network under the guidance of a larger "teacher" model. The teacher processes training data to produce soft targets. The student learns from both the ground‑truth labels and the teacher's outputs, typically by minimizing a weighted combination of the standard loss and a distillation loss. The extra training phase transfers performance from teacher to student.
+
+```mermaid
+flowchart LR
+    D[Training data] --> T[Teacher model]
+    T --> L[Soft logits]
+    D --> S[Student model]
+    L --> C[Distillation loss]
+    S --> C
+    C --> U[Update student weights]
+```
+
+```mermaid
+sequenceDiagram
+    participant T as Teacher
+    participant S as Student
+    T->>T: Forward(x)
+    T-->>S: Soft logits
+    S->>S: Forward(x)
+    S->>L: Compute losses
+    L-->>S: Backpropagate
+```
 
 #### Operator fusion
-Operator fusion combines adjacent operations into a single optimized kernel. In this project we leverage TorchScript to fuse operations when the model is in evaluation mode. Fused graphs reduce kernel launch overhead and improve cache locality.
+Operator fusion combines a sequence of operations into one optimized kernel. When the model is put into evaluation mode and exported with TorchScript, the compiler can spot patterns such as a linear layer followed by activation and addition, then generate a fused kernel. Fewer kernels mean less launch overhead and better cache use.
+
+```mermaid
+flowchart TD
+    subgraph Eager model
+        A[Op1: Linear] --> B[Op2: ReLU] --> C[Op3: Add]
+    end
+    Eager model --> TS[TorchScript compile]
+    TS --> F[Fused kernel executing Op1+Op2+Op3]
+```
 
 #### Key‑value cache
-Transformer decoders repeatedly attend over the previously generated tokens. A key‑value (KV) cache stores the keys and values from earlier time steps so that each new token only computes attention against new data. This trades additional memory for lower latency on long sequences.
+Transformer decoders repeatedly attend over previously generated tokens. A key‑value (KV) cache stores the key and value vectors from past time steps so that each new token only computes attention against the new vectors. The cache grows with sequence length, trading extra memory for reduced compute on long sequences.
+
+```mermaid
+flowchart TD
+    T[Token t] --> K1[Compute K_t, V_t]
+    K1 --> A[Append to cache]
+    A --> ATT[Attention over all cached K,V]
+    ATT --> O[Output for token t]
+```
+
+```mermaid
+sequenceDiagram
+    participant Step
+    participant Cache
+    Step->>Cache: Append K_t, V_t
+    Step->>Step: Compute attention with cached vectors
+    Step-->>Cache: Cache grows with sequence
+```
 
 ### Workflow overview
 
