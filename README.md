@@ -118,10 +118,10 @@ Operator fusion combines a sequence of operations into one optimized kernel. Whe
 
 ```mermaid
 flowchart TD
-    subgraph Eager model
+    subgraph E["Eager model"]
         A[Op1: Linear] --> B[Op2: ReLU] --> C[Op3: Add]
     end
-    Eager model --> TS[TorchScript compile]
+    E --> TS[TorchScript compile]
     TS --> F[Fused kernel executing Op1+Op2+Op3]
 ```
 
